@@ -5,6 +5,8 @@
 
 import { create } from "zustand";
 import { Product } from "./mockApi";
+import { getSessionUserId } from "./session";
+import { requestJson } from "./api";
 
 export interface UserProfile {
   id?: string;
@@ -51,6 +53,12 @@ interface AppStore {
   addMessage: (message: ChatMessage) => void;
   switchThread: (threadId: string) => void;
   deleteThread: (threadId: string) => void;
+  hydrateFromServer: (payload: {
+    user: UserProfile;
+    wishlist: string[];
+    threads: ChatThread[];
+  }) => void;
+  replaceThread: (thread: ChatThread) => void;
 
   // Product Selection & Comparison
   selectedProducts: string[]; // Product IDs for comparison
@@ -64,6 +72,8 @@ interface AppStore {
   setSidebarOpen: (open: boolean) => void;
   currentPage: string;
   setCurrentPage: (page: string) => void;
+  chatProducts: Product[];
+  setChatProducts: (products: Product[]) => void;
 }
 
 const initialUser: UserProfile = {
@@ -75,13 +85,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
   // User Profile
   user: initialUser,
   setUser: (updates) =>
-    set((state) => ({
-      user: { ...state.user, ...updates },
-    })),
+    set((state) => {
+      const user = { ...state.user, ...updates };
+      void requestJson(`/api/users/${getSessionUserId()}`, {
+        method: "PUT",
+        body: JSON.stringify(user),
+      }).catch(() => undefined);
+      return { user };
+    }),
   updateInterests: (interests) =>
-    set((state) => ({
-      user: { ...state.user, interests },
-    })),
+    set((state) => {
+      const user = { ...state.user, interests };
+      void requestJson(`/api/users/${getSessionUserId()}`, {
+        method: "PUT",
+        body: JSON.stringify(user),
+      }).catch(() => undefined);
+      return { user };
+    }),
   logout: () =>
     set({
       user: initialUser,
@@ -96,14 +116,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
   addToWishlist: (productId) =>
     set((state) => {
       if (!state.wishlist.includes(productId)) {
+        void requestJson(`/api/users/${getSessionUserId()}/wishlist/${productId}`, {
+          method: "POST",
+        }).catch(() => undefined);
         return { wishlist: [...state.wishlist, productId] };
       }
       return state;
     }),
   removeFromWishlist: (productId) =>
-    set((state) => ({
-      wishlist: state.wishlist.filter((id) => id !== productId),
-    })),
+    set((state) => {
+      void fetch(`/api/users/${getSessionUserId()}/wishlist/${productId}`, {
+        method: "DELETE",
+      }).catch(() => undefined);
+      return {
+        wishlist: state.wishlist.filter((id) => id !== productId),
+      };
+    }),
   isInWishlist: (productId) => get().wishlist.includes(productId),
 
   // Chat
@@ -145,6 +173,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }),
   deleteThread: (threadId) =>
     set((state) => {
+      void fetch(`/api/users/${getSessionUserId()}/threads/${threadId}`, {
+        method: "DELETE",
+      }).catch(() => undefined);
       const newThreads = state.threads.filter((t) => t.id !== threadId);
       return {
         threads: newThreads,
@@ -152,6 +183,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
           state.currentThread?.id === threadId
             ? newThreads[0] || null
             : state.currentThread,
+      };
+    }),
+  hydrateFromServer: ({ user, wishlist, threads }) =>
+    set({
+      user,
+      wishlist,
+      threads,
+      currentThread: threads[0] || null,
+    }),
+  replaceThread: (thread) =>
+    set((state) => {
+      const existing = state.threads.some((item) => item.id === thread.id);
+      const threads = existing
+        ? state.threads.map((item) => (item.id === thread.id ? thread : item))
+        : [thread, ...state.threads];
+      return {
+        threads,
+        currentThread: thread,
       };
     }),
 
@@ -183,4 +232,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   currentPage: "home",
   setCurrentPage: (page) => set({ currentPage: page }),
+  chatProducts: [],
+  setChatProducts: (products) => set({ chatProducts: products }),
 }));

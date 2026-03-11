@@ -16,10 +16,9 @@ interface BottomBarProps {
 
 export default function BottomBar({ onSendMessage }: BottomBarProps) {
   const [message, setMessage] = useState("");
-  const [rows, setRows] = useState(2);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { sendMessage, loading } = useChat();
-  const { selectedProducts, user } = useAppStore();
+  const { selectedProducts, user, setCurrentPage } = useAppStore();
 
   // Auto-resize textarea
   useEffect(() => {
@@ -38,6 +37,7 @@ export default function BottomBar({ onSendMessage }: BottomBarProps) {
 
     const userMessage = message;
     setMessage("");
+    setCurrentPage("chat");
 
     try {
       const response = await sendMessage(userMessage, {
@@ -75,7 +75,7 @@ export default function BottomBar({ onSendMessage }: BottomBarProps) {
               placeholder:text-muted-foreground
               border border-border focus:border-primary focus:outline-none
               resize-none max-h-48 text-base leading-relaxed"
-            rows={rows}
+            rows={2}
           />
 
           {/* Voice Button (Placeholder) */}

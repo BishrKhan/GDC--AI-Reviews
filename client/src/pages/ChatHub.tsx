@@ -17,7 +17,7 @@ interface ChatHubProps {
 }
 
 export default function ChatHub({ onNavigate }: ChatHubProps) {
-  const { currentThread, createThread, addMessage, user, setCurrentPage } = useAppStore();
+  const { currentThread, createThread, addMessage, user, setCurrentPage, chatProducts } = useAppStore();
   const { products } = useTrendingProducts(8);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -60,18 +60,6 @@ export default function ChatHub({ onNavigate }: ChatHubProps) {
   return (
     <AppLayout onNavigate={onNavigate} onSendMessage={handleSendMessage}>
       <div className="space-y-8">
-        {/* Top Products */}
-        <ProductGrid
-          products={products}
-          title="Featured Products"
-          onNavigateToComparison={() => {
-            setCurrentPage("comparison");
-            if (onNavigate) {
-              onNavigate("comparison");
-            }
-          }}
-        />
-
         {/* Chat Area */}
         <div className="space-y-6">
           <h2 className="text-2xl font-bold text-foreground">Chat</h2>
@@ -129,6 +117,39 @@ export default function ChatHub({ onNavigate }: ChatHubProps) {
             </div>
           </ScrollArea>
         </div>
+
+        {/* Search Results */}
+        {chatProducts.length > 0 ? (
+          <div className="space-y-3">
+            <div>
+              <h2 className="text-2xl font-bold text-foreground">Search Results</h2>
+              <p className="text-sm text-muted-foreground">
+                These product cards come from the latest shopping search.
+              </p>
+            </div>
+            <ProductGrid
+              products={chatProducts}
+              title="Product Matches"
+              onNavigateToComparison={() => {
+                setCurrentPage("comparison");
+                if (onNavigate) {
+                  onNavigate("comparison");
+                }
+              }}
+            />
+          </div>
+        ) : (
+          <ProductGrid
+            products={products}
+            title="Featured Products"
+            onNavigateToComparison={() => {
+              setCurrentPage("comparison");
+              if (onNavigate) {
+                onNavigate("comparison");
+              }
+            }}
+          />
+        )}
 
         {/* Quick Actions */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

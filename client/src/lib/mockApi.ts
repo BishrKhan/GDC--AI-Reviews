@@ -1,7 +1,9 @@
 /**
- * Mock API utilities for PROD-BOT
- * Simulates product scraping and LLM responses
+ * API utilities for PROD-BOT.
+ * Keeps a local fallback catalog so the UI can still render if the Python API is not running.
  */
+
+import { requestJson } from "./api";
 
 export interface Product {
   id: string;
@@ -23,7 +25,7 @@ export interface ComparisonResult {
   facts: number;
 }
 
-// Mock product database
+// Local fallback product database
 export const mockProducts: Product[] = [
   {
     id: "prod-1",
@@ -175,95 +177,100 @@ export const mockCategories = [
 ];
 
 /**
- * Mock API: Scrape products based on query
+ * Product search backed by FastAPI, with a fallback to the local seed catalog.
  */
 export async function scrapeProducts(
   query: string,
   category?: string,
   limit: number = 4
 ): Promise<Product[]> {
-  // Simulate network delay
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  try {
+    const params = new URLSearchParams();
+    if (query) params.set("query", query);
+    if (category) params.set("category", category);
+    params.set("limit", String(limit));
+    return await requestJson<Product[]>(`/api/products/search?${params.toString()}`);
+  } catch {
+    let filtered = mockProducts;
 
-  let filtered = mockProducts;
+    if (category) {
+      filtered = filtered.filter(
+        (p) => p.category.toLowerCase() === category.toLowerCase()
+      );
+    }
 
-  if (category) {
-    filtered = filtered.filter(
-      (p) => p.category.toLowerCase() === category.toLowerCase()
-    );
+    if (query) {
+      const lowered = query.toLowerCase();
+      filtered = filtered.filter(
+        (p) =>
+          p.name.toLowerCase().includes(lowered) ||
+          p.brand.toLowerCase().includes(lowered) ||
+          p.category.toLowerCase().includes(lowered)
+      );
+    }
+
+    return filtered.slice(0, limit);
   }
-
-  if (query) {
-    const q = query.toLowerCase();
-    filtered = filtered.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.brand.toLowerCase().includes(q) ||
-        p.category.toLowerCase().includes(q)
-    );
-  }
-
-  return filtered.slice(0, limit);
 }
 
 /**
- * Mock API: Compare products
+ * Product comparison backed by FastAPI, with a local fallback.
  */
 export async function compareProducts(
   productIds: string[]
 ): Promise<ComparisonResult> {
-  // Simulate network delay
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  try {
+    return await requestJson<ComparisonResult>("/api/products/compare", {
+      method: "POST",
+      body: JSON.stringify({ product_ids: productIds }),
+    });
+  } catch {
+    const products = mockProducts.filter((p) => productIds.includes(p.id));
 
-  const products = mockProducts.filter((p) => productIds.includes(p.id));
+    if (products.length === 0) {
+      return {
+        products: [],
+        winner: "",
+        scores: {},
+        insights: [],
+        facts: 0,
+      };
+    }
 
-  if (products.length === 0) {
+    const scores: Record<string, number> = {};
+    let maxScore = 0;
+    let winner = "";
+
+    products.forEach((p) => {
+      const score = Math.round((p.rating / 5) * 100);
+      scores[p.id] = score;
+      if (score > maxScore) {
+        maxScore = score;
+        winner = p.id;
+      }
+    });
+
     return {
-      products: [],
-      winner: "",
-      scores: {},
-      insights: [],
-      facts: 0,
+      products,
+      winner,
+      scores,
+      insights: [
+        `${products.find((p) => p.id === winner)?.name} leads in overall value and performance.`,
+        `Price range: $${Math.min(...products.map((p) => p.price))} - $${Math.max(...products.map((p) => p.price))}`,
+        `Average rating: ${(products.reduce((sum, p) => sum + p.rating, 0) / products.length).toFixed(1)}/5`,
+      ],
+      facts: products.length * 44,
     };
   }
-
-  // Calculate scores based on price and rating
-  const scores: Record<string, number> = {};
-  let maxScore = 0;
-  let winner = "";
-
-  products.forEach((p) => {
-    const score = Math.round((p.rating / 5) * 100);
-    scores[p.id] = score;
-    if (score > maxScore) {
-      maxScore = score;
-      winner = p.id;
-    }
-  });
-
-  const insights = [
-    `${products.find((p) => p.id === winner)?.name} leads in overall value and performance.`,
-    `Price range: $${Math.min(...products.map((p) => p.price))} - $${Math.max(...products.map((p) => p.price))}`,
-    `Average rating: ${(products.reduce((sum, p) => sum + p.rating, 0) / products.length).toFixed(1)}/5`,
-  ];
-
-  return {
-    products,
-    winner,
-    scores,
-    insights,
-    facts: products.length * 44, // Mock fact count
-  };
 }
 
 /**
- * Mock API: LLM chat response
+ * Local fallback chatbot if the Python API is unavailable.
  */
 export async function getLLMResponse(
   message: string,
   context?: { selectedProducts?: string[]; interests?: string[] }
 ): Promise<string> {
-  // Simulate network delay
   await new Promise((resolve) => setTimeout(resolve, 800));
 
   const lowerMessage = message.toLowerCase();
@@ -298,22 +305,34 @@ export async function getLLMResponse(
 }
 
 /**
- * Mock API: Get trending products
+ * Trending products backed by FastAPI with a local fallback.
  */
 export async function getTrendingProducts(limit: number = 4): Promise<Product[]> {
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  return mockProducts.slice(0, limit);
+  try {
+    return await requestJson<Product[]>(`/api/products/trending?limit=${limit}`);
+  } catch {
+    return mockProducts.slice(0, limit);
+  }
 }
 
 /**
- * Mock API: Search products by category
+ * Category product lookup backed by FastAPI with a local fallback.
  */
 export async function getProductsByCategory(
   category: string,
   limit: number = 4
 ): Promise<Product[]> {
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  return mockProducts
-    .filter((p) => p.category.toLowerCase() === category.toLowerCase())
-    .slice(0, limit);
+  return scrapeProducts("", category, limit);
+}
+
+export async function getProductsByIds(productIds: string[]): Promise<Product[]> {
+  if (productIds.length === 0) {
+    return [];
+  }
+
+  try {
+    return await requestJson<Product[]>(`/api/products/by-ids?ids=${productIds.join(",")}`);
+  } catch {
+    return mockProducts.filter((product) => productIds.includes(product.id));
+  }
 }
