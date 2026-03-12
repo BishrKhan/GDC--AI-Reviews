@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -9,20 +10,49 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from backend.catalog import CATEGORIES, SEED_PRODUCTS, search_ddgs_products
+from backend.catalog import (
+    CATEGORIES,
+    SEED_PRODUCTS,
+    has_required_catalog_fields,
+    refresh_products_from_amazon,
+    search_ddgs_products,
+)
+from backend.langchain_flow import run_comparison_rag, run_review_rag
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "prod_bot.sqlite3"
 CACHE_TTL_SECONDS = 60 * 30
-SEARCH_CACHE_VERSION = "amazon-ca-v4-direct-search"
+SEARCH_CACHE_VERSION = "amazon-ca-v5-required-fields"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+COMPARISON_KEYWORDS = (
+    "compare",
+    "comparison",
+    "versus",
+    " vs ",
+    "better",
+    "best",
+    "winner",
+    "choose",
+    "pick",
+)
+
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=os.getenv("PROD_BOT_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+logger = logging.getLogger("prod_bot.main")
 
 
 class Product(BaseModel):
@@ -46,6 +76,7 @@ class ComparisonResult(BaseModel):
     winner: str
     scores: dict[str, int]
     insights: list[str]
+    productHighlights: dict[str, list[str]] = Field(default_factory=dict)
     facts: int
 
 
@@ -99,6 +130,17 @@ class ChatRequest(BaseModel):
     message: str
     selected_product_ids: list[str] = Field(default_factory=list)
     interests: list[str] = Field(default_factory=list)
+
+
+class ResetChatRequest(BaseModel):
+    selected_product_ids: list[str] = Field(default_factory=list)
+
+
+class ResetChatResponse(BaseModel):
+    status: str
+    selected_count: int
+    products: list[Product] = Field(default_factory=list)
+    comparison: ComparisonResult | None = None
 
 
 class ChatResponse(BaseModel):
@@ -342,7 +384,11 @@ def load_cached_results(connection: sqlite3.Connection, cache_key: str) -> list[
         return None
     if now_ms() - row["created_at"] > CACHE_TTL_SECONDS * 1000:
         return None
-    return [Product(**item) for item in json.loads(row["results_json"])]
+    cached_items = json.loads(row["results_json"])
+    if not cached_items or not all(has_required_catalog_fields(item) for item in cached_items):
+        logger.warning("Discarding cached search results because one or more products are incomplete")
+        return None
+    return [Product(**item) for item in cached_items]
 
 
 def save_cached_results(connection: sqlite3.Connection, cache_key: str, products: list[Product]) -> None:
@@ -374,7 +420,8 @@ def search_products(connection: sqlite3.Connection, query: str | None, category:
         return cached
 
     results = search_ddgs_products(query, category, limit)
-    products = [Product(**item) for item in results[:limit]]
+    filtered_results = [item for item in results if has_required_catalog_fields(item)]
+    products = [Product(**item) for item in filtered_results[:limit]]
     for product in products:
         upsert_product(connection, product.model_dump())
     connection.commit()
@@ -464,10 +511,71 @@ def save_message(connection: sqlite3.Connection, thread_id: str, role: str, cont
     return message
 
 
-def build_comparison(products: list[Product]) -> ComparisonResult:
-    if not products:
-        return ComparisonResult(products=[], winner="", scores={}, insights=[], facts=0)
+def delete_all_threads(connection: sqlite3.Connection, user_id: str) -> None:
+    thread_rows = connection.execute(
+        "SELECT id FROM chat_threads WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    thread_ids = [row["id"] for row in thread_rows]
+    if thread_ids:
+        placeholders = ",".join("?" for _ in thread_ids)
+        connection.execute(
+            f"DELETE FROM chat_messages WHERE thread_id IN ({placeholders})",
+            thread_ids,
+        )
+    connection.execute("DELETE FROM chat_threads WHERE user_id = ?", (user_id,))
+    connection.commit()
 
+
+def prepare_selected_products_for_chat(
+    connection: sqlite3.Connection,
+    selected_product_ids: list[str],
+) -> list[Product]:
+    logger.info("Preparing selected products for chat: ids=%s", selected_product_ids)
+    products = get_products_by_ids(connection, selected_product_ids)
+    if not products:
+        logger.warning("No selected products were found in the database for ids=%s", selected_product_ids)
+        return []
+
+    refreshed = refresh_products_from_amazon([product.model_dump() for product in products])
+    enriched_products = [Product(**item) for item in refreshed]
+    logger.info(
+        "Refreshed %s selected products for chat; review counts=%s",
+        len(enriched_products),
+        [product.reviewCount for product in enriched_products],
+    )
+    for product in enriched_products:
+        upsert_product(connection, product.model_dump())
+    connection.commit()
+    return enriched_products
+
+
+def build_product_context(products: list[Product]) -> str:
+    sections: list[str] = []
+    for product in products:
+        specs_preview = ", ".join(
+            f"{key}={value}" for key, value in list(product.specs.items())[:6]
+        ) or "No notable specs captured."
+        review_preview = " | ".join(product.reviews[:3]) or "No review snippets captured."
+        sections.append(
+            "\n".join(
+                [
+                    f"Product ID: {product.id}",
+                    f"Name: {product.name}",
+                    f"Brand: {product.brand}",
+                    f"Price: ${product.price:.2f}",
+                    f"Rating: {product.rating:.1f}/5 from {product.reviewCount} reviews",
+                    f"Description: {product.description or 'No description available.'}",
+                    f"Review snippets: {review_preview}",
+                    f"Specs: {specs_preview}",
+                    f"Amazon URL: {product.amazonLink}",
+                ]
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def score_products_for_comparison(products: list[Product]) -> tuple[dict[str, int], str, int]:
     scores: dict[str, int] = {}
     winner = products[0].id
     best_score = -1
@@ -482,6 +590,88 @@ def build_comparison(products: list[Product]) -> ComparisonResult:
             best_score = score
             winner = product.id
 
+    return scores, winner, best_score
+
+
+def extract_json_object(raw_content: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(raw_content)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        start = raw_content.find("{")
+        end = raw_content.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(raw_content[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
+def build_fallback_product_highlights(products: list[Product]) -> dict[str, list[str]]:
+    highlights: dict[str, list[str]] = {}
+    for product in products:
+        highlights[product.id] = [
+            f"Rating signal: {product.rating:.1f}/5 from {product.reviewCount} reviews.",
+            f"Price point: ${product.price:.2f} from {product.brand or 'Unknown brand'}.",
+        ]
+    return highlights
+
+
+def build_llm_comparison(
+    products: list[Product],
+    fallback_winner: str,
+    fallback_insights: list[str],
+) -> tuple[str, list[str], dict[str, list[str]]] | None:
+    if len(products) < 2:
+        return None
+
+    product_ids = {product.id for product in products}
+    fallback_highlights = build_fallback_product_highlights(products)
+    try:
+        logger.info("Calling LangChain comparison reasoning for %s products", len(products))
+        parsed = run_comparison_rag(
+            [product.model_dump() for product in products],
+            fallback_winner=fallback_winner,
+            fallback_insights=fallback_insights,
+            model=GROQ_MODEL,
+        )
+        if not parsed:
+            logger.warning("LangChain comparison response did not contain valid JSON")
+            return None
+
+        winner = str(parsed.get("winner", "")).strip()
+        raw_insights = parsed.get("insights", [])
+        insights = [str(item).strip() for item in raw_insights if str(item).strip()]
+        raw_highlights = parsed.get("product_highlights", {})
+        product_highlights = {
+            product_id: [str(item).strip() for item in values if str(item).strip()][:3]
+            for product_id, values in raw_highlights.items()
+            if product_id in product_ids and isinstance(values, list)
+        }
+        if winner not in product_ids:
+            logger.warning("LangChain comparison winner %r was not in the selected product ids", winner)
+            return None
+        if len(insights) < 2:
+            insights = fallback_insights
+        for product in products:
+            if len(product_highlights.get(product.id, [])) < 2:
+                product_highlights[product.id] = fallback_highlights[product.id]
+        logger.info("LangChain comparison winner selected: %s", winner)
+        return winner, insights[:3], product_highlights
+    except Exception:
+        logger.exception("LangChain comparison winner selection failed")
+        return None
+
+
+def build_comparison(products: list[Product]) -> ComparisonResult:
+    if not products:
+        return ComparisonResult(products=[], winner="", scores={}, insights=[], productHighlights={}, facts=0)
+
+    scores, winner, best_score = score_products_for_comparison(products)
+    product_highlights = build_fallback_product_highlights(products)
+
     winner_name = next((product.name for product in products if product.id == winner), "This product")
     insights = [
         f"{winner_name} offers the strongest overall mix of rating, review depth, and price.",
@@ -490,11 +680,19 @@ def build_comparison(products: list[Product]) -> ComparisonResult:
         f"Review count range: {min(product.reviewCount for product in products)} - {max(product.reviewCount for product in products)}",
     ]
 
+    llm_comparison = build_llm_comparison(products, winner, insights[:3])
+    if llm_comparison:
+        winner, llm_insights, product_highlights = llm_comparison
+        insights = llm_insights + [insights[-1]]
+        if scores.get(winner, 0) <= best_score:
+            scores[winner] = min(100, best_score + 1)
+
     return ComparisonResult(
         products=products,
         winner=winner,
         scores=scores,
         insights=insights,
+        productHighlights=product_highlights,
         facts=len(products) * 12,
     )
 
@@ -507,30 +705,15 @@ def infer_search_query(message: str) -> str:
     return message.strip()
 
 
-def build_product_context(products: list[Product]) -> str:
-    sections: list[str] = []
-    for product in products:
-        reviews = " | ".join(product.reviews[:3]) if product.reviews else "No review snippets captured."
-        sections.append(
-            "\n".join(
-                [
-                    f"Product: {product.name}",
-                    f"Brand: {product.brand}",
-                    f"Price: ${product.price:.2f}",
-                    f"Rating: {product.rating:.1f}/5 from {product.reviewCount} reviews",
-                    f"Description: {product.description or 'No description available.'}",
-                    f"Review snippets: {reviews}",
-                    f"Specs: {json.dumps(product.specs)}",
-                    f"Amazon URL: {product.amazonLink}",
-                ]
-            )
-        )
-    return "\n\n".join(sections)
+def message_requests_comparison(message: str) -> bool:
+    lowered = f" {message.lower().strip()} "
+    return any(keyword in lowered for keyword in COMPARISON_KEYWORDS)
 
 
 def groq_chat(message: str, products: list[Product]) -> str | None:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
+        logger.warning("Skipping direct Groq fallback because GROQ_API_KEY is not set")
         return None
 
     system_prompt = (
@@ -543,11 +726,17 @@ def groq_chat(message: str, products: list[Product]) -> str | None:
         "temperature": 0.2,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Context:\n{build_product_context(products)}\n\nQuestion: {message}"},
+            {
+                "role": "user",
+                "content": "Context:\n"
+                + build_product_context(products)
+                + f"\n\nQuestion: {message}",
+            },
         ],
     }
 
     try:
+        logger.info("Calling Groq REST fallback for %s products", len(products))
         response = requests.post(
             GROQ_API_URL,
             headers={
@@ -559,18 +748,39 @@ def groq_chat(message: str, products: list[Product]) -> str | None:
         )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"].strip()
+        logger.info("Groq REST fallback succeeded with %s characters in the response", len(content))
+        return content
     except Exception:
+        logger.exception("Groq REST fallback failed")
         return None
 
 
 def build_selected_product_response(message: str, products: list[Product]) -> str:
+    logger.info(
+        "Building selected-product response for message=%r with products=%s",
+        message,
+        [product.id for product in products],
+    )
+    product_payload = [product.model_dump() for product in products]
+    llm_response = run_review_rag(message, product_payload, model=GROQ_MODEL)
+    if llm_response:
+        logger.info("Selected-product response resolved via LangChain RAG")
+        return llm_response
+
+    logger.warning("LangChain RAG returned no response; trying Groq REST fallback")
     llm_response = groq_chat(message, products)
     if llm_response:
+        logger.info("Selected-product response resolved via Groq REST fallback")
         return llm_response
 
     highest_rated = max(products, key=lambda product: (product.rating, product.reviewCount))
     most_reviewed = max(products, key=lambda product: product.reviewCount)
+    logger.warning(
+        "Selected-product response fell back to canned summary; highest_rated=%s most_reviewed=%s",
+        highest_rated.id,
+        most_reviewed.id,
+    )
     return (
         f"For the selected products, {highest_rated.name} has the strongest rating signal, while "
         f"{most_reviewed.name} has the most review volume. Ask me to compare comfort, value, pros/cons, "
@@ -585,15 +795,24 @@ def generate_chat_response(
     interests: list[str],
 ) -> tuple[str, list[Product], ComparisonResult | None]:
     lowered = message.lower()
+    logger.info(
+        "Generating chat response for message=%r selected_product_ids=%s interests=%s",
+        message,
+        selected_product_ids,
+        interests,
+    )
 
     if selected_product_ids:
-        products = get_products_by_ids(connection, selected_product_ids)
+        products = prepare_selected_products_for_chat(connection, selected_product_ids)
         if products:
-            comparison = build_comparison(products) if len(products) >= 2 else None
+            logger.info("Selected-product chat path active for %s products", len(products))
+            comparison = build_comparison(products) if len(products) >= 2 and message_requests_comparison(message) else None
             return build_selected_product_response(message, products), products, comparison
+        logger.warning("Selected-product ids were provided, but no products were available after refresh")
 
     if any(keyword in lowered for keyword in ("compare", "versus", " vs ")) and len(selected_product_ids) >= 2:
         products = get_products_by_ids(connection, selected_product_ids)
+        logger.info("Using lightweight comparison response for ids=%s", selected_product_ids)
         comparison = build_comparison(products)
         winner_name = next((product.name for product in products if product.id == comparison.winner), "that option")
         response = (
@@ -608,12 +827,14 @@ def generate_chat_response(
 
     if products:
         top_names = ", ".join(product.name for product in products[:3])
+        logger.info("Search chat path returned %s products for query=%r", len(products), search_query)
         response = (
             f"I found {len(products)} Amazon.ca products that match \"{search_query}\". "
             f"Strong candidates are {top_names}."
         )
         return response, products, None
 
+    logger.warning("Chat search path found no products for query=%r", search_query)
     response = "I could not find a good match yet. Try naming the product type, budget, or brand you want."
     return response, [], None
 
@@ -744,6 +965,13 @@ def remove_wishlist_item(user_id: str, product_id: str) -> dict[str, str]:
 
 @app.post("/api/users/{user_id}/chat", response_model=ChatResponse)
 def chat_with_bot(user_id: str, request: ChatRequest) -> ChatResponse:
+    logger.info(
+        "Chat request received: user_id=%s thread_id=%s selected_product_ids=%s message=%r",
+        user_id,
+        request.thread_id,
+        request.selected_product_ids,
+        request.message,
+    )
     with closing(connect_db()) as connection:
         ensure_user(connection, user_id)
         thread = get_or_create_thread(connection, user_id, request.thread_id, request.title)
@@ -755,10 +983,43 @@ def chat_with_bot(user_id: str, request: ChatRequest) -> ChatResponse:
             request.interests,
         )
         save_message(connection, thread.id, "assistant", assistant_message)
+        logger.info(
+            "Chat response completed: thread_id=%s products=%s comparison=%s response_chars=%s",
+            thread.id,
+            [product.id for product in products],
+            comparison.winner if comparison else None,
+            len(assistant_message),
+        )
         refreshed_thread = next(item for item in load_threads(connection, user_id) if item.id == thread.id)
         return ChatResponse(
             assistant_message=assistant_message,
             thread=refreshed_thread,
+            products=products,
+            comparison=comparison,
+        )
+
+
+@app.delete("/api/users/{user_id}/threads")
+def delete_all_user_threads(user_id: str) -> dict[str, str]:
+    with closing(connect_db()) as connection:
+        delete_all_threads(connection, user_id)
+        return {"status": "ok"}
+
+
+@app.post("/api/users/{user_id}/chat/reset", response_model=ResetChatResponse)
+def reset_chat_for_selection(user_id: str, request: ResetChatRequest) -> ResetChatResponse:
+    with closing(connect_db()) as connection:
+        ensure_user(connection, user_id)
+        delete_all_threads(connection, user_id)
+        products: list[Product] = []
+        comparison: ComparisonResult | None = None
+        if request.selected_product_ids:
+            products = prepare_selected_products_for_chat(connection, request.selected_product_ids)
+            if len(products) >= 2:
+                comparison = build_comparison(products)
+        return ResetChatResponse(
+            status="ok",
+            selected_count=len(request.selected_product_ids),
             products=products,
             comparison=comparison,
         )

@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+try:
+    from curl_cffi import requests as curl_requests
+except Exception:  # pragma: no cover - optional import for local setup
+    curl_requests = None
 
 try:
     from ddgs import DDGS
 except Exception:  # pragma: no cover - optional import for local setup
     DDGS = None
+
+
+logger = logging.getLogger("prod_bot.catalog")
 
 
 @dataclass(frozen=True)
@@ -219,11 +232,19 @@ AMAZON_HEADERS = {
     ),
     "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
 }
 AMAZON_BASE_URL = "https://www.amazon.ca"
 AMAZON_PRODUCT_RE = re.compile(r"/(?:[^/]+/)?(?:dp|gp/product)/([A-Z0-9]{10})", re.IGNORECASE)
 RATING_RE = re.compile(r"(\d(?:\.\d)?)\s*out of\s*5", re.IGNORECASE)
 REVIEW_COUNT_RE = re.compile(r"([\d,]+)")
+RETRIABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
 IGNORED_QUERY_TOKENS = {
     "buy",
     "shop",
@@ -244,13 +265,11 @@ def stable_rating(identifier: str) -> float:
     return round(4.1 + (seed % 9) / 10, 1)
 
 
-def extract_price(text: str, identifier: str) -> float:
+def extract_price(text: str) -> float | None:
     match = PRICE_RE.search(text)
     if match:
         return float(match.group(1).replace(",", ""))
-
-    seed = int(hashlib.sha1(identifier.encode("utf-8")).hexdigest()[2:6], 16)
-    return float(49 + (seed % 1150))
+    return None
 
 
 def infer_brand(title: str, domain: str) -> str:
@@ -287,6 +306,120 @@ def infer_category(query: str | None, category: str | None) -> str:
 
 def build_placeholder_image(name: str) -> str:
     return f"https://placehold.co/600x600/e8f4ea/1f2937?text={quote_plus(name[:42])}"
+
+
+def has_required_catalog_fields(product: dict[str, Any]) -> bool:
+    name = str(product.get("name") or "").strip()
+    description = str(product.get("description") or "").strip()
+    image = str(product.get("image") or "").strip()
+    price = product.get("price")
+
+    if not name or not description or not image:
+        return False
+    if image.startswith("https://placehold.co/"):
+        return False
+    if not isinstance(price, (int, float)):
+        return False
+    return float(price) > 0
+
+
+def amazon_response_looks_blocked(text: str) -> bool:
+    lowered = text.lower()
+    blocked_markers = (
+        "enter the characters you see below",
+        "sorry, we just need to make sure you're not a robot",
+        "captcha",
+        "api-services-support@amazon.com",
+    )
+    return any(marker in lowered for marker in blocked_markers)
+
+
+def is_amazon_product_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if not is_allowed_canadian_domain(parsed.netloc.lower()):
+        return False
+    return AMAZON_PRODUCT_RE.search(parsed.path) is not None
+
+
+def create_http_session() -> Any:
+    if curl_requests is not None:
+        impersonate = os.getenv("AMAZON_IMPERSONATE", "chrome")
+        session = curl_requests.Session(impersonate=impersonate)
+        session.headers.update(AMAZON_HEADERS)
+        logger.info("Using curl_cffi session for Amazon scraping with impersonate=%s", impersonate)
+        return session
+
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.8,
+        status_forcelist=sorted(RETRIABLE_STATUS_CODES),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(AMAZON_HEADERS)
+    logger.info("Using requests session with retry adapter for Amazon scraping")
+    return session
+
+
+def warm_amazon_session(session: Any) -> None:
+    try:
+        response = session.get(AMAZON_BASE_URL, timeout=10, allow_redirects=True)
+        logger.info("Amazon session warmup: status=%s final_url=%s", response.status_code, response.url)
+    except Exception:
+        logger.exception("Amazon session warmup failed")
+
+
+def fetch_with_backoff(session: Any, url: str, *, referer: str | None = None, context: str) -> Any | None:
+    headers: dict[str, str] = {}
+    if referer:
+        headers["Referer"] = referer
+
+    for attempt in range(1, 4):
+        try:
+            response = session.get(url, timeout=12, allow_redirects=True, headers=headers or None)
+            logger.info(
+                "%s response: url=%s status=%s final_url=%s attempt=%s",
+                context,
+                url,
+                response.status_code,
+                response.url,
+                attempt,
+            )
+            if response.status_code in RETRIABLE_STATUS_CODES and attempt < 3:
+                sleep_seconds = 0.8 * attempt
+                logger.warning(
+                    "%s got retriable status=%s for url=%s; sleeping %.1fs before retry",
+                    context,
+                    response.status_code,
+                    url,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+                continue
+            response.raise_for_status()
+            return response
+        except Exception:
+            if attempt < 3:
+                sleep_seconds = 0.8 * attempt
+                logger.exception(
+                    "%s request failed for url=%s on attempt=%s; retrying after %.1fs",
+                    context,
+                    url,
+                    attempt,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+                continue
+            logger.exception("%s request failed for url=%s after %s attempts", context, url, attempt)
+            return None
+
+    return None
 
 
 def extract_review_count(text: str) -> int:
@@ -382,17 +515,30 @@ def scrape_amazon_product(
     query: str | None,
     category: str | None,
 ) -> dict[str, Any] | None:
-    try:
-        response = session.get(url, timeout=10, allow_redirects=True)
-        response.raise_for_status()
-    except Exception:
+    if not is_amazon_product_url(url):
+        logger.warning("Skipping non-product Amazon URL during product scrape: url=%s", url)
+        return None
+
+    logger.info("Fetching Amazon product page: url=%s", url)
+    response = fetch_with_backoff(
+        session,
+        url,
+        referer=AMAZON_BASE_URL,
+        context="Amazon product",
+    )
+    if response is None:
         return None
 
     html = response.text
+    if amazon_response_looks_blocked(html):
+        logger.warning("Amazon product page looks blocked or captcha-protected: url=%s", response.url)
+        return None
+
     soup = BeautifulSoup(html, "html.parser")
     final_url = normalize_amazon_url(str(response.url))
     final_domain = urlparse(final_url).netloc.lower()
     if not is_allowed_canadian_domain(final_domain):
+        logger.warning("Amazon product page redirected to a disallowed domain: url=%s domain=%s", final_url, final_domain)
         return None
 
     title_node = soup.select_one("#productTitle")
@@ -408,15 +554,16 @@ def scrape_amazon_product(
     brand_text = brand_node.get_text(" ", strip=True) if brand_node else ""
     description = extract_amazon_description(soup, fallback_body)
     reviews = extract_amazon_reviews(soup)
-    image = extract_amazon_image(html, soup) or build_placeholder_image(title)
+    image = extract_amazon_image(html, soup)
+    price = extract_price(price_text or fallback_body)
 
     identifier = hashlib.sha1(final_url.encode("utf-8")).hexdigest()
     asin_match = AMAZON_PRODUCT_RE.search(urlparse(final_url).path)
 
-    return {
+    product = {
         "id": f"search-{identifier[:12]}",
         "name": normalize_title(title or fallback_title, final_domain),
-        "price": extract_price(price_text or fallback_body, identifier),
+        "price": price,
         "rating": parse_rating(rating_text, identifier),
         "reviewCount": extract_review_count(review_count_text),
         "reviews": reviews,
@@ -433,6 +580,25 @@ def scrape_amazon_product(
         "sourceUrl": final_url,
         "description": description or fallback_body or f"Result from {final_domain}",
     }
+    if has_required_catalog_fields(product):
+        logger.info(
+            "Amazon product page parsed successfully: asin=%s price=%s has_image=%s description_len=%s",
+            product["specs"].get("asin", ""),
+            product["price"],
+            bool(product["image"]),
+            len(str(product["description"])),
+        )
+        return product
+
+    logger.warning(
+        "Amazon product page missing required fields: asin=%s has_name=%s price=%s has_image=%s description_len=%s",
+        product["specs"].get("asin", ""),
+        bool(product.get("name")),
+        product.get("price"),
+        bool(product.get("image")),
+        len(str(product.get("description") or "")),
+    )
+    return None
 
 
 def is_allowed_canadian_domain(domain: str) -> bool:
@@ -446,12 +612,12 @@ def extract_query_tokens(query: str | None, category: str | None) -> list[str]:
     return [token for token in tokens if len(token) >= 3 and token not in IGNORED_QUERY_TOKENS]
 
 
-def parse_search_result_price(card: BeautifulSoup, fallback_key: str) -> float:
+def parse_search_result_price(card: BeautifulSoup) -> float | None:
     price_node = card.select_one(".a-price .a-offscreen")
     if price_node:
         text = price_node.get_text(" ", strip=True)
         if text:
-          return extract_price(text, fallback_key)
+            return extract_price(text)
 
     whole = card.select_one(".a-price-whole")
     fraction = card.select_one(".a-price-fraction")
@@ -464,7 +630,7 @@ def parse_search_result_price(card: BeautifulSoup, fallback_key: str) -> float:
         except ValueError:
             pass
 
-    return extract_price("", fallback_key)
+    return None
 
 
 def parse_search_result_review_count(card: BeautifulSoup) -> int:
@@ -493,6 +659,7 @@ def parse_search_result_brand(title: str) -> str:
 
 
 def normalize_search_card(
+    session: requests.Session,
     card: BeautifulSoup,
     query: str | None,
     category: str | None,
@@ -513,16 +680,16 @@ def normalize_search_card(
 
     product_url = urljoin(AMAZON_BASE_URL, link_node.get("href", f"/dp/{asin}")) if link_node else f"{AMAZON_BASE_URL}/dp/{asin}"
     normalized_url = normalize_amazon_url(product_url)
-    image = image_node.get("src") if image_node and image_node.get("src") else build_placeholder_image(title)
+    image = image_node.get("src") if image_node and image_node.get("src") else ""
     review_count = parse_search_result_review_count(card)
     description = ""
     if subtitle_node:
         description = " ".join(subtitle_node.get_text(" ", strip=True).split())
 
-    return {
+    product = {
         "id": f"search-{asin.lower()}",
         "name": title,
-        "price": parse_search_result_price(card, asin),
+        "price": parse_search_result_price(card),
         "rating": parse_rating(rating_node.get_text(" ", strip=True) if rating_node else "", asin),
         "reviewCount": review_count,
         "reviews": [],
@@ -540,6 +707,47 @@ def normalize_search_card(
         "description": description,
     }
 
+    if has_required_catalog_fields(product):
+        logger.info(
+            "Amazon search card accepted directly: asin=%s price=%s has_image=%s description_len=%s",
+            asin,
+            product["price"],
+            bool(product["image"]),
+            len(product["description"]),
+        )
+        return product
+
+    logger.info(
+        "Amazon search card incomplete, trying product page enrichment: asin=%s price=%s has_image=%s description_len=%s",
+        asin,
+        product["price"],
+        bool(product["image"]),
+        len(product["description"]),
+    )
+
+    scraped = scrape_amazon_product(
+        session,
+        normalized_url,
+        title,
+        description,
+        query,
+        category,
+    )
+    if scraped is not None:
+        logger.info("Amazon search card recovered via product page enrichment: asin=%s", asin)
+        return {
+            **product,
+            **scraped,
+            "id": product["id"],
+            "specs": {
+                **product.get("specs", {}),
+                **scraped.get("specs", {}),
+            },
+        }
+
+    logger.warning("Amazon search card skipped after failed enrichment: asin=%s", asin)
+    return None
+
 
 def scrape_amazon_search_results(query: str | None, category: str | None, limit: int) -> list[dict[str, Any]]:
     search_terms = " ".join(
@@ -548,27 +756,37 @@ def scrape_amazon_search_results(query: str | None, category: str | None, limit:
     if not search_terms:
         return []
 
-    session = requests.Session()
-    session.headers.update(AMAZON_HEADERS)
+    session = create_http_session()
+    warm_amazon_session(session)
 
     collected: list[dict[str, Any]] = []
     seen_asins: set[str] = set()
 
+    logger.info("Starting Amazon search scrape: query=%r category=%r limit=%s", query, category, limit)
+
     for page in (1, 2):
         search_url = f"{AMAZON_BASE_URL}/s?k={quote_plus(search_terms)}&page={page}"
-        try:
-            response = session.get(search_url, timeout=12)
-            response.raise_for_status()
-        except Exception:
+        response = fetch_with_backoff(
+            session,
+            search_url,
+            referer=AMAZON_BASE_URL,
+            context="Amazon search",
+        )
+        if response is None:
+            break
+
+        if amazon_response_looks_blocked(response.text):
+            logger.warning("Amazon search page looks blocked or captcha-protected: url=%s", search_url)
             break
 
         soup = BeautifulSoup(response.text, "html.parser")
         cards = soup.select('[data-component-type="s-search-result"]')
+        logger.info("Amazon search page parsed: page=%s cards=%s", page, len(cards))
         if not cards:
             continue
 
         for card in cards:
-            product = normalize_search_card(card, query, category)
+            product = normalize_search_card(session, card, query, category)
             if not product:
                 continue
 
@@ -579,9 +797,53 @@ def scrape_amazon_search_results(query: str | None, category: str | None, limit:
             seen_asins.add(asin)
             collected.append(product)
             if len(collected) >= limit:
+                logger.info("Amazon search scrape reached limit with %s complete products", len(collected))
                 return collected
 
+    logger.info("Amazon search scrape finished with %s complete products", len(collected))
     return collected
+
+
+def refresh_products_from_amazon(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not products:
+        return []
+
+    session = create_http_session()
+    warm_amazon_session(session)
+
+    refreshed_products: list[dict[str, Any]] = []
+    for product in products:
+        amazon_url = str(product.get("amazonLink") or product.get("sourceUrl") or "").strip()
+        if not amazon_url:
+            refreshed_products.append(product)
+            continue
+
+        scraped = scrape_amazon_product(
+            session,
+            amazon_url,
+            str(product.get("name") or ""),
+            str(product.get("description") or ""),
+            None,
+            None,
+        )
+        if not scraped:
+            refreshed_products.append(product)
+            continue
+
+        refreshed_products.append(
+            {
+                **product,
+                **scraped,
+                "id": product.get("id", scraped.get("id", "")),
+                "category": product.get("category") or scraped.get("category", "Tech"),
+                "specs": {
+                    **product.get("specs", {}),
+                    **scraped.get("specs", {}),
+                },
+            }
+        )
+
+    return refreshed_products
 
 
 def normalize_search_result(
@@ -620,41 +882,27 @@ def normalize_search_result(
         return None
 
     normalized_url = normalize_amazon_url(url)
+    if not is_amazon_product_url(normalized_url):
+        logger.info("Skipping DDGS result because it is not a direct Amazon product URL: url=%s", normalized_url)
+        return None
+
     scraped = scrape_amazon_product(session, normalized_url, title, body, query, category)
     if scraped is not None:
         return scraped
-
-    identifier = hashlib.sha1(normalized_url.encode("utf-8")).hexdigest()
-    normalized_title = normalize_title(title, domain)
-
-    return {
-        "id": f"search-{identifier[:12]}",
-        "name": normalized_title,
-        "price": extract_price(f"{title} {body}", identifier),
-        "rating": stable_rating(identifier),
-        "reviewCount": 0,
-        "reviews": [],
-        "image": build_placeholder_image(normalized_title),
-        "category": infer_category(query, category),
-        "brand": infer_brand(normalized_title, domain),
-        "specs": {
-            "source": domain,
-            "store": "amazon.ca",
-            "match": "Amazon.ca search",
-        },
-        "amazonLink": normalized_url,
-        "sourceUrl": normalized_url,
-        "description": body or f"Result from {domain}",
-    }
+    return None
 
 
 def search_ddgs_products(query: str | None, category: str | None, limit: int) -> list[dict[str, Any]]:
     if DDGS is None:
+        logger.warning("DDGS is unavailable; cannot use search fallback")
         return []
 
     direct_results = scrape_amazon_search_results(query, category, limit)
     if direct_results:
+        logger.info("Using direct Amazon search results with %s products", len(direct_results))
         return direct_results
+
+    logger.warning("Direct Amazon search returned no complete products; falling back to DDGS")
 
     search_terms = " ".join(
         part for part in (query, CATEGORY_NAMES.get(category, category)) if part
@@ -664,13 +912,14 @@ def search_ddgs_products(query: str | None, category: str | None, limit: int) ->
 
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    session = requests.Session()
-    session.headers.update(AMAZON_HEADERS)
+    session = create_http_session()
+    warm_amazon_session(session)
 
     try:
         with DDGS() as ddgs:
             site_query = f"site:amazon.ca {search_terms}"
             try:
+                logger.info("Starting DDGS fallback query: %r", site_query)
                 results = ddgs.text(
                     site_query,
                     region=DDGS_REGION,
@@ -678,6 +927,7 @@ def search_ddgs_products(query: str | None, category: str | None, limit: int) ->
                     max_results=max(limit * 3, 12),
                 )
             except Exception:
+                logger.exception("DDGS fallback query failed: %r", site_query)
                 return []
 
             for result in results:
@@ -687,10 +937,13 @@ def search_ddgs_products(query: str | None, category: str | None, limit: int) ->
                 seen_ids.add(product["id"])
                 normalized.append(product)
                 if len(normalized) >= limit:
+                    logger.info("DDGS fallback produced %s complete products", len(normalized))
                     return normalized
     except Exception:
+        logger.exception("DDGS fallback failed unexpectedly")
         return []
 
+    logger.info("DDGS fallback finished with %s complete products", len(normalized))
     return normalized
 
 

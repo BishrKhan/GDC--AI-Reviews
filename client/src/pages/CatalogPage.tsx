@@ -4,6 +4,9 @@ import ProductGrid from "@/components/ProductGrid";
 import SearchWordmark from "@/components/SearchWordmark";
 import { Button } from "@/components/ui/button";
 import { useCatalogProducts, useProductsByIds } from "@/hooks/useProducts";
+import { requestJson } from "@/lib/api";
+import { compareProducts, ComparisonResult, Product } from "@/lib/mockApi";
+import { getSessionUserId } from "@/lib/session";
 import { useAppStore } from "@/lib/store";
 
 interface CatalogPageProps {
@@ -17,6 +20,9 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
     selectedProducts,
     clearSelection,
     setCurrentPage,
+    resetChat,
+    setChatProducts,
+    setChatComparison,
   } = useAppStore();
   const [draftQuery, setDraftQuery] = useState(activeSearchQuery);
   const { products, loading, error } = useCatalogProducts(activeSearchQuery, 10);
@@ -32,7 +38,34 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
     setActiveSearchQuery(draftQuery.trim());
   };
 
-  const openChat = () => {
+  const openChat = async () => {
+    resetChat();
+    try {
+      const response = await requestJson<{
+        status: string;
+        selected_count: number;
+        products: Product[];
+        comparison: ComparisonResult | null;
+      }>(`/api/users/${getSessionUserId()}/chat/reset`, {
+        method: "POST",
+        body: JSON.stringify({
+          selected_product_ids: selectedProducts,
+        }),
+      });
+      setChatProducts(response.products || []);
+      setChatComparison(response.comparison || null);
+    } catch {
+      setChatProducts(selectedProductDetails);
+      if (selectedProducts.length >= 2) {
+        try {
+          const comparison = await compareProducts(selectedProducts);
+          setChatComparison(comparison);
+        } catch {
+          setChatComparison(null);
+        }
+      }
+    }
+
     setCurrentPage("chat");
     if (onNavigate) {
       onNavigate("chat");
@@ -40,7 +73,7 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
   };
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#f7fbff_0%,_#eef3fb_42%,_#ffffff_100%)] px-4 py-6 text-foreground sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#effbe9_0%,_#f7fcf3_38%,_#ffffff_100%)] px-4 py-6 text-foreground sm:px-6 lg:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
         <header className="flex flex-col gap-4 rounded-[28px] border border-white/80 bg-white/80 px-5 py-5 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur sm:px-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -71,7 +104,7 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
               placeholder="Search products, categories, or brands"
               className="h-10 flex-1 border-0 bg-transparent text-base text-slate-900 outline-none placeholder:text-slate-400"
             />
-            <Button type="submit" className="rounded-full bg-sky-600 px-5 text-white hover:bg-sky-700">
+            <Button type="submit" className="rounded-full bg-[#2cdb04] px-5 text-white hover:bg-[#24b603]">
               Search
             </Button>
           </form>
@@ -102,25 +135,25 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
             <ProductGrid products={products} loading={loading} />
           </div>
 
-          <aside className="rounded-[28px] border border-slate-200 bg-slate-950 p-5 text-white shadow-[0_18px_60px_rgba(15,23,42,0.16)] sm:p-6">
-            <p className="text-xs uppercase tracking-[0.3em] text-sky-200/80">Shortlist</p>
+          <aside className="rounded-[28px] border border-[#d7efcf] bg-[linear-gradient(180deg,_#f7fcf3_0%,_#eefbe7_100%)] p-5 text-slate-900 shadow-[0_18px_60px_rgba(44,219,4,0.10)] sm:p-6">
+            <p className="text-xs uppercase tracking-[0.3em] text-[#2cdb04]">Shortlist</p>
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">{selectedProducts.length}/3 selected</h2>
-            <p className="mt-3 text-sm leading-6 text-slate-300">
+            <p className="mt-3 text-sm leading-6 text-slate-600">
               Select one to three products from the grid. Chat will use them as context for recommendations, comparisons, and review summaries.
             </p>
 
             <div className="mt-6 space-y-3">
               {selectedProducts.length > 0 ? (
                 selectedProductDetails.map((product, index) => (
-                  <div key={product.id} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200">
-                    <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-sky-500/20 text-xs font-semibold text-sky-200">
+                  <div key={product.id} className="rounded-2xl border border-[#d7efcf] bg-white/80 px-4 py-3 text-sm text-slate-700 shadow-sm">
+                    <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#2cdb04]/15 text-xs font-semibold text-[#1f7e05]">
                       {index + 1}
                     </span>
                     {product.name}
                   </div>
                 ))
               ) : (
-                <div className="rounded-2xl border border-dashed border-white/15 px-4 py-6 text-sm text-slate-400">
+                <div className="rounded-2xl border border-dashed border-[#b9dfad] bg-white/55 px-4 py-6 text-sm text-slate-500">
                   Nothing selected yet.
                 </div>
               )}
@@ -129,9 +162,9 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
             <div className="mt-8 space-y-3">
               <Button
                 type="button"
-                onClick={openChat}
+                onClick={() => void openChat()}
                 disabled={selectedProducts.length === 0}
-                className="h-11 w-full rounded-full bg-sky-500 text-white hover:bg-sky-400 disabled:bg-slate-700"
+                className="h-11 w-full rounded-full bg-[#2cdb04] text-white hover:bg-[#24b603] disabled:bg-slate-300"
               >
                 Open chat
                 <ArrowRight className="ml-2 h-4 w-4" />
@@ -140,7 +173,7 @@ export default function CatalogPage({ onNavigate }: CatalogPageProps) {
                 type="button"
                 variant="outline"
                 onClick={clearSelection}
-                className="h-11 w-full rounded-full border-white/15 bg-transparent text-white hover:bg-white/5"
+                className="h-11 w-full rounded-full border-[#b9dfad] bg-white/75 text-slate-700 hover:bg-white"
               >
                 Clear selection
               </Button>

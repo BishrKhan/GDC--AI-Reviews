@@ -178,4 +178,76 @@
       max-width: 1280px; /* Standard content width */
     }
   }
+
+  .chat-markdown {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .chat-markdown p,
+  .chat-markdown ul,
+  .chat-markdown ol,
+  .chat-markdown pre,
+  .chat-markdown blockquote {
+    margin-top: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .chat-markdown > :first-child {
+    margin-top: 0;
+  }
+
+  .chat-markdown > :last-child {
+    margin-bottom: 0;
+  }
+
+  .chat-markdown ul,
+  .chat-markdown ol {
+    padding-left: 1.25rem;
+  }
+
+  .chat-markdown ul {
+    list-style: disc;
+  }
+
+  .chat-markdown ol {
+    list-style: decimal;
+  }
+
+  .chat-markdown li + li {
+    margin-top: 0.35rem;
+  }
+
+  .chat-markdown h1,
+  .chat-markdown h2,
+  .chat-markdown h3,
+  .chat-markdown h4 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .chat-markdown strong {
+    font-weight: 700;
+  }
+
+  .chat-markdown code {
+    border-radius: 0.5rem;
+    background: rgba(15, 23, 42, 0.06);
+    padding: 0.1rem 0.35rem;
+    font-size: 0.95em;
+  }
+
+  .chat-markdown pre {
+    overflow-x: auto;
+    border-radius: 1rem;
+    background: #e8f4ea;
+    padding: 0.9rem 1rem;
+  }
+
+  .chat-markdown pre code {
+    background: transparent;
+    padding: 0;
+  }
 }

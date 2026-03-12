@@ -4,7 +4,7 @@
  */
 
 import { create } from "zustand";
-import { Product } from "./mockApi";
+import { ComparisonResult, Product } from "./mockApi";
 import { getSessionUserId } from "./session";
 import { requestJson } from "./api";
 
@@ -59,6 +59,7 @@ interface AppStore {
     threads: ChatThread[];
   }) => void;
   replaceThread: (thread: ChatThread) => void;
+  resetChat: () => void;
 
   // Product Selection & Comparison
   selectedProducts: string[]; // Product IDs for comparison
@@ -76,6 +77,8 @@ interface AppStore {
   setActiveSearchQuery: (query: string) => void;
   chatProducts: Product[];
   setChatProducts: (products: Product[]) => void;
+  chatComparison: ComparisonResult | null;
+  setChatComparison: (comparison: ComparisonResult | null) => void;
 }
 
 const initialUser: UserProfile = {
@@ -205,6 +208,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
         currentThread: thread,
       };
     }),
+  resetChat: () =>
+    set({
+      threads: [],
+      currentThread: null,
+      chatProducts: [],
+      chatComparison: null,
+    }),
 
   // Product Selection
   selectedProducts: [],
@@ -238,4 +248,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setActiveSearchQuery: (query) => set({ activeSearchQuery: query }),
   chatProducts: [],
   setChatProducts: (products) => set({ chatProducts: products }),
+  chatComparison: null,
+  setChatComparison: (comparison) => set({ chatComparison: comparison }),
 }));

@@ -51,6 +51,9 @@ export function useChat() {
 
           state.replaceThread(response.thread);
           state.setChatProducts(response.products || []);
+          if (response.comparison) {
+            state.setChatComparison(response.comparison);
+          }
           return response.assistant_message;
         } catch {
           const fallback = await getLLMResponse(message, context);

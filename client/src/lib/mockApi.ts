@@ -26,6 +26,7 @@ export interface ComparisonResult {
   winner: string;
   scores: Record<string, number>;
   insights: string[];
+  productHighlights: Record<string, string[]>;
   facts: number;
 }
 
@@ -237,6 +238,7 @@ export async function compareProducts(
         winner: "",
         scores: {},
         insights: [],
+        productHighlights: {},
         facts: 0,
       };
     }
@@ -263,6 +265,15 @@ export async function compareProducts(
         `Price range: $${Math.min(...products.map((p) => p.price))} - $${Math.max(...products.map((p) => p.price))}`,
         `Average rating: ${(products.reduce((sum, p) => sum + p.rating, 0) / products.length).toFixed(1)}/5`,
       ],
+      productHighlights: Object.fromEntries(
+        products.map((product) => [
+          product.id,
+          [
+            `Rating signal: ${product.rating.toFixed(1)}/5.`,
+            `Price point: $${product.price}.`,
+          ],
+        ])
+      ),
       facts: products.length * 44,
     };
   }
