@@ -1,0 +1,9 @@
+.git
+.gitignore
+.venv
+node_modules
+dist
+.manus-logs
+backend/__pycache__
+backend/data/*.sqlite3-shm
+backend/data/*.sqlite3-wal

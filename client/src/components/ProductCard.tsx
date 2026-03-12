@@ -39,29 +39,7 @@ export default function ProductCard({
     if (onCompare) {
       onCompare(product.id);
     } else {
-      // Calculate what the new selection will be BEFORE toggling
-      const isCurrentlySelected = selectedProducts.includes(product.id);
-      let updatedSelected: string[];
-      
-      if (isCurrentlySelected) {
-        // Remove from selection
-        updatedSelected = selectedProducts.filter((id) => id !== product.id);
-      } else {
-        // Add to selection (max 4 products)
-        if (selectedProducts.length < 4) {
-          updatedSelected = [...selectedProducts, product.id];
-        } else {
-          updatedSelected = selectedProducts;
-        }
-      }
-      
-      // Toggle the selection in store
       toggleProductSelection(product.id);
-      
-      // Navigate if 2+ products are now selected
-      if (updatedSelected.length >= 2 && onNavigateToComparison) {
-        setTimeout(onNavigateToComparison, 50);
-      }
     }
   };
 
@@ -109,10 +87,10 @@ export default function ProductCard({
                 : "bg-white/90 text-primary hover:bg-white"
             }
           `}
-          aria-label="Add to comparison"
-          title={selected ? "Remove from comparison" : "Add to comparison"}
+          aria-label={selected ? "Remove from shortlist" : "Add to shortlist"}
+          title={selected ? "Remove from shortlist" : "Add to shortlist"}
         >
-          VS
+          {selected ? "OK" : "+"}
         </button>
 
 

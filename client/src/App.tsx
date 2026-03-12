@@ -9,13 +9,8 @@ import { useAppStore } from "./lib/store";
 import { requestJson } from "./lib/api";
 import { getSessionUserId } from "./lib/session";
 import Landing from "./pages/Landing";
-import Onboarding from "./pages/Onboarding";
-import InterestsPage from "./pages/InterestsPage";
 import ChatHub from "./pages/ChatHub";
-import ComparisonPage from "./pages/ComparisonPage";
-import WishlistPage from "./pages/WishlistPage";
-import QAPage from "./pages/QAPage";
-import ProfilePage from "./pages/ProfilePage";
+import CatalogPage from "./pages/CatalogPage";
 
 function Router() {
   const { currentPage, setCurrentPage } = useAppStore();
@@ -27,20 +22,10 @@ function Router() {
   return (
     <Switch>
       <Route path={"/"}>
-        {currentPage === "onboarding" ? (
-          <Onboarding onNavigate={handleNavigate} />
-        ) : currentPage === "interests" ? (
-          <InterestsPage onNavigate={handleNavigate} />
+        {currentPage === "catalog" ? (
+          <CatalogPage onNavigate={handleNavigate} />
         ) : currentPage === "chat" ? (
           <ChatHub onNavigate={handleNavigate} />
-        ) : currentPage === "comparison" ? (
-          <ComparisonPage onNavigate={handleNavigate} />
-        ) : currentPage === "wishlist" ? (
-          <WishlistPage onNavigate={handleNavigate} />
-        ) : currentPage === "qa" ? (
-          <QAPage onNavigate={handleNavigate} />
-        ) : currentPage === "profile" ? (
-          <ProfilePage onNavigate={handleNavigate} />
         ) : (
           <Landing onNavigate={handleNavigate} />
         )}

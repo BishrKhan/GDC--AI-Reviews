@@ -72,6 +72,8 @@ interface AppStore {
   setSidebarOpen: (open: boolean) => void;
   currentPage: string;
   setCurrentPage: (page: string) => void;
+  activeSearchQuery: string;
+  setActiveSearchQuery: (query: string) => void;
   chatProducts: Product[];
   setChatProducts: (products: Product[]) => void;
 }
@@ -214,7 +216,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
             (id) => id !== productId
           ),
         };
-      } else if (state.selectedProducts.length < 4) {
+      } else if (state.selectedProducts.length < 3) {
         return {
           selectedProducts: [...state.selectedProducts, productId],
         };
@@ -232,6 +234,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   currentPage: "home",
   setCurrentPage: (page) => set({ currentPage: page }),
+  activeSearchQuery: "",
+  setActiveSearchQuery: (query) => set({ activeSearchQuery: query }),
   chatProducts: [],
   setChatProducts: (products) => set({ chatProducts: products }),
 }));

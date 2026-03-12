@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from backend.catalog import CATEGORIES, SEED_PRODUCTS, filter_seed_products, search_ddgs_products
+from backend.catalog import CATEGORIES, SEED_PRODUCTS, search_ddgs_products
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "prod_bot.sqlite3"
 CACHE_TTL_SECONDS = 60 * 30
-SEARCH_CACHE_VERSION = "ca-shopping-v2"
+SEARCH_CACHE_VERSION = "amazon-ca-v4-direct-search"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 class Product(BaseModel):
@@ -33,6 +37,8 @@ class Product(BaseModel):
     amazonLink: str
     sourceUrl: str
     description: str = ""
+    reviewCount: int = 0
+    reviews: list[str] = Field(default_factory=list)
 
 
 class ComparisonResult(BaseModel):
@@ -185,6 +191,17 @@ def init_db() -> None:
             );
             """
         )
+        product_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(products)").fetchall()
+        }
+        if "review_count" not in product_columns:
+            connection.execute(
+                "ALTER TABLE products ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "reviews_json" not in product_columns:
+            connection.execute(
+                "ALTER TABLE products ADD COLUMN reviews_json TEXT NOT NULL DEFAULT '[]'"
+            )
         connection.commit()
         seed_products(connection)
 
@@ -245,6 +262,8 @@ def row_to_product(row: sqlite3.Row) -> Product:
         amazonLink=row["amazon_link"],
         sourceUrl=row["source_url"],
         description=row["description"] or "",
+        reviewCount=row["review_count"] if "review_count" in row.keys() else 0,
+        reviews=json.loads(row["reviews_json"] or "[]") if "reviews_json" in row.keys() else [],
     )
 
 
@@ -265,8 +284,8 @@ def upsert_product(connection: sqlite3.Connection, product: dict[str, Any]) -> N
         """
         INSERT INTO products (
             id, name, price, rating, image, category, brand,
-            specs_json, amazon_link, source_url, description, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            specs_json, amazon_link, source_url, description, review_count, reviews_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             price = excluded.price,
@@ -278,6 +297,8 @@ def upsert_product(connection: sqlite3.Connection, product: dict[str, Any]) -> N
             amazon_link = excluded.amazon_link,
             source_url = excluded.source_url,
             description = excluded.description,
+            review_count = excluded.review_count,
+            reviews_json = excluded.reviews_json,
             updated_at = excluded.updated_at
         """,
         (
@@ -292,6 +313,8 @@ def upsert_product(connection: sqlite3.Connection, product: dict[str, Any]) -> N
             product["amazonLink"],
             product.get("sourceUrl", product["amazonLink"]),
             product.get("description", ""),
+            int(product.get("reviewCount", 0)),
+            json.dumps(product.get("reviews", [])),
             now_ms(),
         ),
     )
@@ -351,9 +374,6 @@ def search_products(connection: sqlite3.Connection, query: str | None, category:
         return cached
 
     results = search_ddgs_products(query, category, limit)
-    if not results:
-        results = filter_seed_products(query, category, limit)
-
     products = [Product(**item) for item in results[:limit]]
     for product in products:
         upsert_product(connection, product.model_dump())
@@ -455,7 +475,8 @@ def build_comparison(products: list[Product]) -> ComparisonResult:
     for product in products:
         price_score = max(0, 100 - int(product.price / 20))
         rating_score = int(product.rating * 20)
-        score = int(price_score * 0.35 + rating_score * 0.65)
+        review_score = min(100, int(product.reviewCount / 50))
+        score = int(price_score * 0.25 + rating_score * 0.55 + review_score * 0.20)
         scores[product.id] = score
         if score > best_score:
             best_score = score
@@ -463,9 +484,10 @@ def build_comparison(products: list[Product]) -> ComparisonResult:
 
     winner_name = next((product.name for product in products if product.id == winner), "This product")
     insights = [
-        f"{winner_name} offers the strongest overall mix of rating and price.",
+        f"{winner_name} offers the strongest overall mix of rating, review depth, and price.",
         f"Price range: ${min(product.price for product in products):.0f} - ${max(product.price for product in products):.0f}",
         f"Average rating: {(sum(product.rating for product in products) / len(products)):.1f}/5",
+        f"Review count range: {min(product.reviewCount for product in products)} - {max(product.reviewCount for product in products)}",
     ]
 
     return ComparisonResult(
@@ -485,6 +507,77 @@ def infer_search_query(message: str) -> str:
     return message.strip()
 
 
+def build_product_context(products: list[Product]) -> str:
+    sections: list[str] = []
+    for product in products:
+        reviews = " | ".join(product.reviews[:3]) if product.reviews else "No review snippets captured."
+        sections.append(
+            "\n".join(
+                [
+                    f"Product: {product.name}",
+                    f"Brand: {product.brand}",
+                    f"Price: ${product.price:.2f}",
+                    f"Rating: {product.rating:.1f}/5 from {product.reviewCount} reviews",
+                    f"Description: {product.description or 'No description available.'}",
+                    f"Review snippets: {reviews}",
+                    f"Specs: {json.dumps(product.specs)}",
+                    f"Amazon URL: {product.amazonLink}",
+                ]
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def groq_chat(message: str, products: list[Product]) -> str | None:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+
+    system_prompt = (
+        "You are a concise shopping advisor. Use only the provided Amazon.ca product context. "
+        "Help the user choose between products by comparing tradeoffs, reviews, rating strength, and fit for needs. "
+        "If evidence is missing, say so plainly. Keep it short and decision-oriented."
+    )
+    payload = {
+        "model": GROQ_MODEL,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Context:\n{build_product_context(products)}\n\nQuestion: {message}"},
+        ],
+    }
+
+    try:
+        response = requests.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=25,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
+
+
+def build_selected_product_response(message: str, products: list[Product]) -> str:
+    llm_response = groq_chat(message, products)
+    if llm_response:
+        return llm_response
+
+    highest_rated = max(products, key=lambda product: (product.rating, product.reviewCount))
+    most_reviewed = max(products, key=lambda product: product.reviewCount)
+    return (
+        f"For the selected products, {highest_rated.name} has the strongest rating signal, while "
+        f"{most_reviewed.name} has the most review volume. Ask me to compare comfort, value, pros/cons, "
+        "or which one fits your budget and priorities best."
+    )
+
+
 def generate_chat_response(
     connection: sqlite3.Connection,
     message: str,
@@ -492,6 +585,12 @@ def generate_chat_response(
     interests: list[str],
 ) -> tuple[str, list[Product], ComparisonResult | None]:
     lowered = message.lower()
+
+    if selected_product_ids:
+        products = get_products_by_ids(connection, selected_product_ids)
+        if products:
+            comparison = build_comparison(products) if len(products) >= 2 else None
+            return build_selected_product_response(message, products), products, comparison
 
     if any(keyword in lowered for keyword in ("compare", "versus", " vs ")) and len(selected_product_ids) >= 2:
         products = get_products_by_ids(connection, selected_product_ids)
@@ -505,12 +604,12 @@ def generate_chat_response(
 
     search_query = infer_search_query(message)
     category = interests[0] if interests else None
-    products = search_products(connection, search_query, category, 8)
+    products = search_products(connection, search_query, category, 10)
 
     if products:
         top_names = ", ".join(product.name for product in products[:3])
         response = (
-            f"I found {len(products)} products that match \"{search_query}\". "
+            f"I found {len(products)} Amazon.ca products that match \"{search_query}\". "
             f"Strong candidates are {top_names}."
         )
         return response, products, None

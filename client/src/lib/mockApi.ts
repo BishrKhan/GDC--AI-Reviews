@@ -15,6 +15,10 @@ export interface Product {
   brand: string;
   specs: Record<string, string | number>;
   amazonLink: string;
+  sourceUrl?: string;
+  description?: string;
+  reviewCount?: number;
+  reviews?: string[];
 }
 
 export interface ComparisonResult {

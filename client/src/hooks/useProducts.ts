@@ -32,6 +32,35 @@ export function useTrendingProducts(limit: number = 4) {
   return { products, loading, error };
 }
 
+export function useCatalogProducts(query: string, limit: number = 10) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      try {
+        setLoading(true);
+        const data = query.trim()
+          ? await scrapeProducts(query.trim(), undefined, limit)
+          : await getTrendingProducts(limit);
+        setProducts(data);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to fetch products");
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const debounceTimer = setTimeout(fetchProducts, query.trim() ? 250 : 0);
+    return () => clearTimeout(debounceTimer);
+  }, [query, limit]);
+
+  return { products, loading, error };
+}
+
 export function useProductsByCategory(category: string | null, limit: number = 4) {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
