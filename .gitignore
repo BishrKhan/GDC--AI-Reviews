@@ -1,6 +1,7 @@
 # Dependencies
 **/node_modules
 .pnpm-store/
+.venv/
 
 #markdown
 *.md
@@ -47,6 +48,8 @@ pids
 *.pid
 *.seed
 *.pid.lock
+backend/data/
+backend/__pycache__/
 
 # Coverage directory used by tools like istanbul
 coverage/
@@ -110,3 +113,6 @@ temp/
 
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
+
+!README.md
+!backend/README.md

@@ -3,7 +3,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Product, scrapeProducts, compareProducts, getTrendingProducts, getProductsByCategory } from "@/lib/mockApi";
+import { Product, scrapeProducts, compareProducts, getTrendingProducts, getProductsByCategory, getProductsByIds } from "@/lib/mockApi";
 import { ComparisonResult } from "@/lib/mockApi";
 
 export function useTrendingProducts(limit: number = 4) {
@@ -28,6 +28,35 @@ export function useTrendingProducts(limit: number = 4) {
 
     fetchTrending();
   }, [limit]);
+
+  return { products, loading, error };
+}
+
+export function useCatalogProducts(query: string, limit: number = 10) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      try {
+        setLoading(true);
+        const data = query.trim()
+          ? await scrapeProducts(query.trim(), undefined, limit)
+          : await getTrendingProducts(limit);
+        setProducts(data);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to fetch products");
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const debounceTimer = setTimeout(fetchProducts, query.trim() ? 250 : 0);
+    return () => clearTimeout(debounceTimer);
+  }, [query, limit]);
 
   return { products, loading, error };
 }
@@ -124,4 +153,35 @@ export function useCompareProducts(productIds: string[]) {
   }, [productIds]);
 
   return { result, loading, error };
+}
+
+export function useProductsByIds(productIds: string[]) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (productIds.length === 0) {
+      setProducts([]);
+      return;
+    }
+
+    const fetchProducts = async () => {
+      try {
+        setLoading(true);
+        const data = await getProductsByIds(productIds);
+        setProducts(data);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load products");
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchProducts();
+  }, [productIds]);
+
+  return { products, loading, error };
 }

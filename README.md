@@ -74,6 +74,32 @@ cp .env.example .env
 pnpm dev
 ```
 
+### Docker Compose
+
+Run the frontend and FastAPI backend together with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+This starts:
+
+- Frontend on `http://localhost:3000`
+- FastAPI API on `http://localhost:8000`
+
+If you use Groq for chat responses, export your key before starting Compose:
+
+```bash
+export GROQ_API_KEY=your_key_here
+docker compose up --build
+```
+
+Stop the stack with:
+
+```bash
+docker compose down
+```
+
 ---
 
 ## 👥 Team

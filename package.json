@@ -5,10 +5,13 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite --host",
+    "dev:client": "vite --host",
+    "dev:api": ".venv/bin/python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
     "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "start": "NODE_ENV=production node dist/index.js",
     "preview": "vite preview --host",
     "check": "tsc --noEmit",
+    "check:api": ".venv/bin/python -m py_compile backend/main.py backend/catalog.py",
     "format": "prettier --write ."
   },
   "dependencies": {

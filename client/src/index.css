@@ -43,76 +43,75 @@
 }
 
 :root {
-  /* PROD-BOT: Vibrant Green Accent (#2cdb04) + Clean Minimalist Palette */
-  --primary: #2cdb04; /* Vibrant green - main accent */
+  /* Search-first palette tuned for a light catalog and chat experience. */
+  --primary: #0284c7;
   --primary-foreground: #ffffff;
-  --sidebar-primary: #2cdb04;
+  --sidebar-primary: #0284c7;
   --sidebar-primary-foreground: #ffffff;
-  --chart-1: #2cdb04;
-  --chart-2: #1ea803;
-  --chart-3: #158602;
-  --chart-4: #0d6401;
-  --chart-5: #054200;
-  --radius: 1rem; /* 16px for cards */
-  --background: #f9fafb; /* Light gray background */
-  --foreground: #1f2937; /* Dark text */
-  --card: #ffffff; /* White cards */
+  --chart-1: #0284c7;
+  --chart-2: #0ea5e9;
+  --chart-3: #38bdf8;
+  --chart-4: #7dd3fc;
+  --chart-5: #bae6fd;
+  --radius: 1rem;
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --card: #ffffff;
   --card-foreground: #1f2937;
   --popover: #ffffff;
   --popover-foreground: #1f2937;
-  --secondary: #f3f4f6; /* Light gray secondary */
+  --secondary: #f8fafc;
   --secondary-foreground: #374151;
-  --muted: #e5e7eb; /* Muted gray */
+  --muted: #e2e8f0;
   --muted-foreground: #6b7280;
-  --accent: #2cdb04; /* Green accent */
+  --accent: #e0f2fe;
   --accent-foreground: #ffffff;
-  --destructive: #dc2626; /* Red for warnings */
+  --destructive: #dc2626;
   --destructive-foreground: #ffffff;
-  --border: #e5e7eb; /* Light border */
-  --input: #f3f4f6; /* Light input background */
-  --ring: #2cdb04; /* Green focus ring */
-  --sidebar: #ffffff; /* White sidebar */
+  --border: #e2e8f0;
+  --input: #f8fafc;
+  --ring: #0284c7;
+  --sidebar: #ffffff;
   --sidebar-foreground: #1f2937;
-  --sidebar-accent: #2cdb04;
+  --sidebar-accent: #e0f2fe;
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: #e5e7eb;
-  --sidebar-ring: #2cdb04;
+  --sidebar-ring: #0284c7;
 }
 
 .dark {
-  /* Dark mode - keep green accent consistent */
-  --primary: #2cdb04;
+  --primary: #38bdf8;
   --primary-foreground: #ffffff;
-  --sidebar-primary: #2cdb04;
+  --sidebar-primary: #38bdf8;
   --sidebar-primary-foreground: #ffffff;
-  --background: #0f172a; /* Dark background */
-  --foreground: #f1f5f9; /* Light text */
-  --card: #1e293b; /* Dark card */
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+  --card: #1e293b;
   --card-foreground: #f1f5f9;
   --popover: #1e293b;
   --popover-foreground: #f1f5f9;
-  --secondary: #334155; /* Dark secondary */
+  --secondary: #334155;
   --secondary-foreground: #cbd5e1;
-  --muted: #475569; /* Muted dark */
+  --muted: #475569;
   --muted-foreground: #94a3b8;
-  --accent: #2cdb04; /* Green accent */
+  --accent: #0f172a;
   --accent-foreground: #ffffff;
-  --destructive: #ef4444; /* Red for warnings */
+  --destructive: #ef4444;
   --destructive-foreground: #ffffff;
-  --border: #334155; /* Dark border */
-  --input: #1e293b; /* Dark input */
-  --ring: #2cdb04; /* Green focus ring */
-  --chart-1: #2cdb04;
-  --chart-2: #1ea803;
-  --chart-3: #158602;
-  --chart-4: #0d6401;
-  --chart-5: #054200;
-  --sidebar: #1e293b; /* Dark sidebar */
+  --border: #334155;
+  --input: #1e293b;
+  --ring: #38bdf8;
+  --chart-1: #38bdf8;
+  --chart-2: #0ea5e9;
+  --chart-3: #0284c7;
+  --chart-4: #0369a1;
+  --chart-5: #075985;
+  --sidebar: #1e293b;
   --sidebar-foreground: #f1f5f9;
-  --sidebar-accent: #2cdb04;
+  --sidebar-accent: #0f172a;
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: #334155;
-  --sidebar-ring: #2cdb04;
+  --sidebar-ring: #38bdf8;
 }
 
 @layer base {
@@ -121,6 +120,9 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: Arial, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
   button:not(:disabled),
   [role="button"]:not([aria-disabled="true"]),
@@ -175,5 +177,77 @@
       padding-right: 2rem;
       max-width: 1280px; /* Standard content width */
     }
+  }
+
+  .chat-markdown {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .chat-markdown p,
+  .chat-markdown ul,
+  .chat-markdown ol,
+  .chat-markdown pre,
+  .chat-markdown blockquote {
+    margin-top: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .chat-markdown > :first-child {
+    margin-top: 0;
+  }
+
+  .chat-markdown > :last-child {
+    margin-bottom: 0;
+  }
+
+  .chat-markdown ul,
+  .chat-markdown ol {
+    padding-left: 1.25rem;
+  }
+
+  .chat-markdown ul {
+    list-style: disc;
+  }
+
+  .chat-markdown ol {
+    list-style: decimal;
+  }
+
+  .chat-markdown li + li {
+    margin-top: 0.35rem;
+  }
+
+  .chat-markdown h1,
+  .chat-markdown h2,
+  .chat-markdown h3,
+  .chat-markdown h4 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .chat-markdown strong {
+    font-weight: 700;
+  }
+
+  .chat-markdown code {
+    border-radius: 0.5rem;
+    background: rgba(15, 23, 42, 0.06);
+    padding: 0.1rem 0.35rem;
+    font-size: 0.95em;
+  }
+
+  .chat-markdown pre {
+    overflow-x: auto;
+    border-radius: 1rem;
+    background: #e8f4ea;
+    padding: 0.9rem 1rem;
+  }
+
+  .chat-markdown pre code {
+    background: transparent;
+    padding: 0;
   }
 }

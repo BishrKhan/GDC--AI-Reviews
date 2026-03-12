@@ -166,7 +166,16 @@ export default function ComparisonPage({ onNavigate }: ComparisonPageProps) {
                   <span className="text-sm text-muted-foreground">
                     {product.rating.toFixed(1)}
                   </span>
+                  <span className="text-sm text-muted-foreground">
+                    ({product.reviewCount ?? 0} reviews)
+                  </span>
                 </div>
+
+                {product.description && (
+                  <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
+                    {product.description}
+                  </p>
+                )}
 
                 {/* Specs Preview */}
                 <div className="space-y-3 mb-6 pb-6 border-b border-border">

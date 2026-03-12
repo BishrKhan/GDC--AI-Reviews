@@ -4,9 +4,8 @@
  * DESIGN: Clean grid, remove button, never blank
  */
 
-import { useMemo } from "react";
 import { useAppStore } from "@/lib/store";
-import { mockProducts } from "@/lib/mockApi";
+import { useProductsByIds } from "@/hooks/useProducts";
 import AppLayout from "@/components/AppLayout";
 import ProductCard from "@/components/ProductCard";
 import { Button } from "@/components/ui/button";
@@ -17,10 +16,7 @@ interface WishlistPageProps {
 
 export default function WishlistPage({ onNavigate }: WishlistPageProps) {
   const { wishlist, setCurrentPage } = useAppStore();
-
-  const wishlistProducts = useMemo(() => {
-    return mockProducts.filter((p) => wishlist.includes(p.id));
-  }, [wishlist]);
+  const { products: wishlistProducts } = useProductsByIds(wishlist);
 
   return (
     <AppLayout onNavigate={onNavigate}>
